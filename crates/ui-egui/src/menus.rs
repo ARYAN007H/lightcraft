@@ -202,6 +202,8 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     // Settings ▸ Display
     ("app.displayProfile", "Display Profile", None, ""),
     ("app.about", "About LightCraft", None, "Help"),
+    ("app.checkForUpdates", "Check for Updates…", None, "Help"),
+    ("app.applyUpdate", "Restart to Apply Update", None, ""),
     ("app.systemInfo", "System Info…", None, "Help"),
     ("app.openLogFolder", "Open Log Folder", None, "Help"),
     ("app.whatsNew", "What's New", None, "Help"),
@@ -1251,6 +1253,17 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             app.ui.dialog = Some(Dialog::About);
             Ok(Value::Null)
         }
+        "app.checkForUpdates" => match app.update.start_check() {
+            Ok(()) => {
+                app.toast(&ctx, "Checking for LightCraft updates…");
+                Ok(Value::Null)
+            }
+            Err(e) => {
+                app.toast_error(&ctx, e.clone());
+                Err(e)
+            }
+        },
+        "app.applyUpdate" => app.apply_staged_update(&ctx).map(|()| Value::Null),
         "photo.editInPhotoCraft" => edit_in(app, &ctx, p, true),
         "photo.editInExternal" => edit_in(app, &ctx, p, false),
         "photo.openOriginalInExternal" => open_original_in(app, &ctx, p),

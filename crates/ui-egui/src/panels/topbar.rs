@@ -191,6 +191,24 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 }
                 x -= 40.0;
             }
+            if let Some(ver) = app.update.ready_version().map(str::to_string) {
+                let badge_w = 150.0;
+                let r = Rect::from_min_size(pos2(x - badge_w, full.center().y - 12.0), vec2(badge_w, 24.0));
+                let resp = ui.allocate_rect(r, Sense::click()).on_hover_text("Click to restart LightCraft and apply update");
+                let bg = if resp.hovered() { t.accent } else { t.field };
+                ui.painter().rect_filled(r, 4.0, bg);
+                ui.painter().text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    format!("Restart for v{ver}"),
+                    t.semibold(11.0),
+                    if resp.hovered() { t.canvas } else { t.text },
+                );
+                if resp.clicked() {
+                    let _ = app.run("app.applyUpdate", json!({}));
+                }
+                x -= badge_w + 12.0;
+            }
             // Appearance Mode: a click steps Auto → Light → Dark → Auto; the icon shows the mode
             let (icon, mode) = appearance_icon(app.ui.settings.appearance_mode);
             let r = Rect::from_center_size(pos2(x, full.center().y), vec2(28.0, 28.0));

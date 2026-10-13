@@ -27,3 +27,8 @@ sync_github_name = true
 
 [people.sanyamsingh001]
 display_name = "sanyamsingh001"
+
+[people.ARYAN007H]
+real_name = "Aryan"
+display_name = "Aryan"
+sync_github_name = true

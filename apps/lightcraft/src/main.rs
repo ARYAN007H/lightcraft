@@ -665,6 +665,9 @@ OPTIONS:
                    see docs/control-protocol.md)
   --version, --help
 
+INTERNAL:
+  --update-apply --pid <pid> --staged <dir> --target <path>
+
 ENVIRONMENT:
   LIGHTCRAFT_CONFIG_DIR=DIR   use this settings folder instead of the platform default (empty = no settings folder)
   LIGHTCRAFT_GPU_BACKEND=dx12|vulkan|metal|auto|off   graphics backend (default: DX12 on Windows, Metal on macOS,
@@ -728,6 +731,17 @@ fn panic_log_path_with(env: impl Fn(&str) -> Option<std::ffi::OsString>, temp: s
     env("LIGHTCRAFT_CONFIG_DIR").filter(|value| !value.is_empty()).map(std::path::PathBuf::from).unwrap_or(temp).join("lightcraft-panics.log")
 }
 
+/// Helper mode used after LightCraft has exited to atomically swap in a verified release.
+fn apply_staged_update(pid: u32, staged: &std::path::Path, target: &std::path::Path) -> lightcraft_updater::Result<()> {
+    if !lightcraft_updater::swap::wait_for_exit(pid, std::time::Duration::from_secs(10)) {
+        return Err(lightcraft_updater::UpdateError::Unsupported(format!("the previous LightCraft process ({pid}) did not exit within 10 seconds")));
+    }
+    let staged_manifest = lightcraft_updater::Staged::load(staged)?;
+    lightcraft_updater::swap::apply(&staged_manifest, target)?;
+    lightcraft_updater::swap::relaunch(target, &[])?;
+    Ok(())
+}
+
 fn main() -> eframe::Result {
     // First, so every start-up record is kept for the log file (`logging`).
     let logger = logging::install();
@@ -744,6 +758,39 @@ fn main() -> eframe::Result {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--update-apply" => {
+                let mut pid = None;
+                let mut staged = None;
+                let mut target = None;
+                while let Some(opt) = args.next() {
+                    match opt.as_str() {
+                        "--pid" => pid = args.next().and_then(|p| p.parse().ok()),
+                        "--staged" => staged = args.next().map(std::path::PathBuf::from),
+                        "--target" => target = args.next().map(std::path::PathBuf::from),
+                        other => {
+                            eprintln!("lightcraft: unknown option `{other}` for --update-apply");
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                let Some(pid) = pid else {
+                    eprintln!("lightcraft: --update-apply requires --pid");
+                    std::process::exit(2);
+                };
+                let Some(staged) = staged else {
+                    eprintln!("lightcraft: --update-apply requires --staged");
+                    std::process::exit(2);
+                };
+                let Some(target) = target else {
+                    eprintln!("lightcraft: --update-apply requires --target");
+                    std::process::exit(2);
+                };
+                if let Err(e) = apply_staged_update(pid, &staged, &target) {
+                    eprintln!("lightcraft: could not apply update: {e}");
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             "--control" => control_port = control_port_from("--control", Some(args.next().unwrap_or_default())),
             "--library" => library_dir = args.next().map(std::path::PathBuf::from),
             "--no-demo" => seed_demo = false,
@@ -779,6 +826,17 @@ fn main() -> eframe::Result {
             },
             None => logger.no_file(),
         }
+    }
+    let exe = std::env::current_exe().unwrap_or_default();
+    match lightcraft_updater::on_boot(&exe) {
+        Ok(lightcraft_updater::BootOutcome::Normal) => {}
+        Ok(lightcraft_updater::BootOutcome::Unconfirmed { from, to }) => {
+            log::info!("running updated version {to} (from {from}); awaiting confirmation");
+        }
+        Ok(lightcraft_updater::BootOutcome::RolledBack { failed, restored }) => {
+            log::warn!("version {failed} failed to start repeatedly; rolled back to {restored}");
+        }
+        Err(e) => log::warn!("could not inspect update boot state: {e}"),
     }
     // what the arguments name, resolved now: an empty or relative argument never becomes a drive
     // root, and a whole drive or home folder is not walked (issue #374)
@@ -897,6 +955,16 @@ fn main() -> eframe::Result {
                 #[cfg(target_os = "macos")]
                 let menu =
                     (std::env::var_os("LIGHTCRAFT_NO_NATIVE_MENU").is_none()).then(|| native_menu::NativeMenu::install(&mut app, &cc.egui_ctx));
+                if let Ok(exe) = std::env::current_exe() {
+                    let cache_dir = config_dir().map(|d| d.join("updates")).unwrap_or_else(|| std::env::temp_dir().join("lightcraft-updates"));
+                    let check_state = config_dir()
+                        .map(|d| d.join("update_state.json"))
+                        .unwrap_or_else(|| std::env::temp_dir().join("lightcraft-update-state.json"));
+                    if let Ok(v) = lightcraft_updater::Version::parse(env!("CARGO_PKG_VERSION")) {
+                        let updater = lightcraft_updater::Updater { current: v, exe, cache_dir };
+                        app.update.configure(updater, check_state);
+                    }
+                }
                 Ok(Box::new(App(
                     app,
                     writer,

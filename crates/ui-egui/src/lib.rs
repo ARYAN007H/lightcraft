@@ -37,6 +37,7 @@ pub mod tasks;
 pub mod text_field;
 pub mod theme;
 pub mod titlebar;
+pub mod updates;
 pub mod widgets;
 
 #[cfg(test)]
@@ -404,6 +405,10 @@ pub struct LightcraftApp {
     pub library_problem: Option<panels::library_problem::LibraryProblem>,
     /// The activity stack shows every task, not just the first few ("+N more" was clicked).
     pub activity_expanded: bool,
+    /// Background self-update state.
+    pub update: updates::UpdateState,
+    /// Boot verification completed after drawing clean frames.
+    pub update_confirmed: bool,
 }
 
 impl LightcraftApp {
@@ -480,6 +485,8 @@ impl LightcraftApp {
             library_problem: None,
             activity_expanded: false,
             model_setup: Default::default(),
+            update: updates::UpdateState::default(),
+            update_confirmed: false,
         }
     }
 
@@ -707,6 +714,25 @@ impl LightcraftApp {
     pub fn toast_for(&mut self, ctx: &egui::Context, text: impl Into<String>, secs: f64) {
         let t = ctx.input(|i| i.time);
         self.ui.toast = Some((text.into(), t + secs, None));
+    }
+
+    /// Make library changes durable before handing control to the helper process that swaps binaries.
+    pub fn apply_staged_update(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = ctx;
+            return Err("automatic updates are only available in the desktop app".into());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Err(e) = self.session.close_library() {
+                log::warn!("saving library before update: {e}");
+            }
+            self.update.spawn_apply_helper()?;
+            self.quit_confirmed = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            Ok(())
+        }
     }
 
     /// Reverse geocoding: say how a place-names download ended (a failure stays readable, with what to do).
@@ -1002,6 +1028,15 @@ impl LightcraftApp {
         if ctx.input(|i| i.viewport().close_requested()) && !panels::notices::may_close(self) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
+        if ctx.cumulative_frame_nr() >= 2 && !self.update_confirmed {
+            self.update_confirmed = true;
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Ok(exe) = std::env::current_exe() {
+                if let Err(e) = lightcraft_updater::confirm(&exe) {
+                    log::warn!("could not confirm healthy updated build: {e}");
+                }
+            }
+        }
         let now = ctx.input(|i| i.time);
         let dt = now - self.last_time;
         if dt > 0.0 {
@@ -1025,6 +1060,33 @@ impl LightcraftApp {
         self.save_status(ctx);
         self.slideshow_tick(ctx);
         panels::faces::pump(self, ctx);
+        if self.update.poll() {
+            match &self.update.phase {
+                updates::Phase::Checking => self.ui.status = "Checking for LightCraft updates…".into(),
+                updates::Phase::Staging => self.ui.status = "Downloading and verifying the LightCraft update…".into(),
+                updates::Phase::UpToDate => {
+                    self.ui.status = "LightCraft is up to date.".into();
+                    self.toast(ctx, "LightCraft is up to date");
+                }
+                updates::Phase::Throttled => {
+                    self.ui.status = "LightCraft was checked recently.".into();
+                    self.toast(ctx, "LightCraft was checked recently");
+                }
+                updates::Phase::Ready { version, .. } => {
+                    self.ui.status = format!("LightCraft {version} ready. Restart to apply.");
+                    self.toast_for(ctx, format!("LightCraft {version} ready. Restart to apply."), 5.0);
+                }
+                updates::Phase::Error(e) => {
+                    self.ui.status = format!("Update check failed: {e}");
+                    self.toast_error(ctx, format!("Update check failed: {e}"));
+                }
+                updates::Phase::Idle => {}
+            }
+            ctx.request_repaint();
+        }
+        if self.update.working() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         // back from an external editor: pick up the files it saved
         let focused = ctx.input(|i| i.focused);
         if focused && !self.ui.was_focused && !self.ui.external_edits.is_empty() {
